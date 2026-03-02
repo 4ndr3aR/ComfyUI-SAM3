@@ -917,9 +917,9 @@ def build_sam3_video_model(
             remapped_ckpt.update(inst_predictor_keys)
             print(f"[SAM3] Added {len(inst_predictor_keys)} keys for detector.inst_interactive_predictor")
     
+	# ← now setting strict_state_dict_loading = False if loading a fine-tuned checkpoint at 672px resolution
         missing_keys, unexpected_keys = model.load_state_dict(
-            #remapped_ckpt, strict=False  # ← also change this from strict_state_dict_loading
-            remapped_ckpt, strict=strict_state_dict_loading		# ← remember to set strict_state_dict_loading = False if loading a fine-tuned checkpoint at 672px resolution
+            remapped_ckpt, strict=(strict_state_dict_loading if not is_finetuned else False) 
         )
 
         if missing_keys:
