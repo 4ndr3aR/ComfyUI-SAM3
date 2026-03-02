@@ -847,7 +847,7 @@ def build_sam3_video_model(
             recondition_every_nth_frame=16,
             masklet_confirmation_enable=False,
             decrease_trk_keep_alive_for_empty_masklets=False,
-            image_size=1008,
+            image_size=HARDCODED_IMG_RESOLUTION,
             image_mean=(0.5, 0.5, 0.5),
             image_std=(0.5, 0.5, 0.5),
             compile_model=compile,
@@ -874,7 +874,7 @@ def build_sam3_video_model(
             recondition_every_nth_frame=0,
             masklet_confirmation_enable=False,
             decrease_trk_keep_alive_for_empty_masklets=False,
-            image_size=1008,
+            image_size=HARDCODED_IMG_RESOLUTION,
             image_mean=(0.5, 0.5, 0.5),
             image_std=(0.5, 0.5, 0.5),
             compile_model=compile,
@@ -883,16 +883,31 @@ def build_sam3_video_model(
     # Load checkpoint if provided (supports .pt and .safetensors)
     if load_from_HF and checkpoint_path is None:
         checkpoint_path = download_ckpt_from_hf()
+
     if checkpoint_path is not None:
         ckpt = _load_checkpoint_file(checkpoint_path)
         if "model" in ckpt and isinstance(ckpt["model"], dict):
             ckpt = ckpt["model"]
-
-        # Keys should already be in detector.*/tracker.* format
-        # (incompatible formats are rejected by _load_checkpoint_file)
-        remapped_ckpt = dict(ckpt)
-
-        # If inst_interactive_predictor is enabled, remap tracker weights for it
+    
+        # Detect if this is a fine-tuned Sam3Image checkpoint (bare keys)
+        # vs the official checkpoint (detector.*/tracker.* keys)
+        is_finetuned = any(
+            k.startswith("backbone.") or k.startswith("transformer.")
+            for k in ckpt.keys()
+        )
+    
+        if is_finetuned:
+            # Add detector. prefix to all keys so they map into the video model
+            remapped_ckpt = {f"detector.{k}": v for k, v in ckpt.items()}
+        else:
+            # Keys should already be in detector.*/tracker.* format
+            # (incompatible formats are rejected by _load_checkpoint_file)
+            remapped_ckpt = dict(ckpt)
+    
+        # Strip freqs_cis regardless of checkpoint origin
+        remapped_ckpt = {k: v for k, v in remapped_ckpt.items() if "freqs_cis" not in k}
+    
+        # inst_interactive_predictor remapping (unchanged)
         if enable_inst_interactivity and inst_predictor is not None:
             inst_predictor_keys = {
                 k.replace("tracker.", "detector.inst_interactive_predictor.model."): v
@@ -901,10 +916,12 @@ def build_sam3_video_model(
             }
             remapped_ckpt.update(inst_predictor_keys)
             print(f"[SAM3] Added {len(inst_predictor_keys)} keys for detector.inst_interactive_predictor")
-
+    
         missing_keys, unexpected_keys = model.load_state_dict(
-            remapped_ckpt, strict=strict_state_dict_loading
+            #remapped_ckpt, strict=False  # ← also change this from strict_state_dict_loading
+            remapped_ckpt, strict=strict_state_dict_loading		# ← remember to set strict_state_dict_loading = False if loading a fine-tuned checkpoint at 672px resolution
         )
+
         if missing_keys:
             print(f"Missing keys: {len(missing_keys)}")
         if unexpected_keys:
