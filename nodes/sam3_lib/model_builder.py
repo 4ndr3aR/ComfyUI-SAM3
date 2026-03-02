@@ -600,6 +600,12 @@ def _load_checkpoint(model, checkpoint_path):
         if k.startswith("detector."):
             sam3_image_ckpt[k.replace("detector.", "")] = v
 
+    # Remove freqs_cis buffers — they are resolution-dependent and will be
+    # recomputed correctly by the model for the current img_size.
+    sam3_image_ckpt = {
+        k: v for k, v in sam3_image_ckpt.items() if "freqs_cis" not in k
+    }
+
     # Remap tracker.* -> inst_interactive_predictor.model.* if needed
     if model.inst_interactive_predictor is not None:
         for k, v in ckpt.items():
