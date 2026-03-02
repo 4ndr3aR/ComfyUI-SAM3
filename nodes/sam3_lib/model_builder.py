@@ -921,6 +921,8 @@ def build_sam3_video_model(
         missing_keys, unexpected_keys = model.load_state_dict(
             remapped_ckpt, strict=(strict_state_dict_loading if not is_finetuned else False) 
         )
+        if is_finetuned:
+            print(f"[SAM3] Fine-tuned model detected, loading with strict_state_dict_loading=False, here be dragons...")
 
         if missing_keys:
             print(f"Missing keys: {len(missing_keys)}")
