@@ -116,6 +116,8 @@ from .model.vitdet import ViT
 from .model.vl_combiner import SAM3VLBackbone
 from .sam.transformer import RoPEAttention
 
+#HARDCODED_IMG_RESOLUTION=1008
+HARDCODED_IMG_RESOLUTION=672
 
 # Setup TensorFloat-32 for Ampere GPUs if available
 def _setup_tf32() -> None:
@@ -123,8 +125,10 @@ def _setup_tf32() -> None:
     if torch.cuda.is_available():
         device_props = torch.cuda.get_device_properties(0)
         if device_props.major >= 8:
-            torch.backends.cuda.matmul.allow_tf32 = True
-            torch.backends.cudnn.allow_tf32 = True
+            #torch.backends.cuda.matmul.allow_tf32 = True
+            #torch.backends.cudnn.allow_tf32 = True
+            torch.backends.cuda.matmul.fp32_precision = 'tf32'  # or 'ieee' for full precision
+            torch.backends.cudnn.conv.fp32_precision = 'tf32'   # or 'ieee'
 
 
 _setup_tf32()
@@ -144,7 +148,7 @@ def _create_position_encoding(precompute_resolution=None):
 def _create_vit_backbone(compile_mode=None):
     """Create ViT backbone for visual feature extraction."""
     return ViT(
-        img_size=1008,
+        img_size=HARDCODED_IMG_RESOLUTION,
         pretrain_img_size=336,
         patch_size=14,
         embed_dim=1024,
@@ -254,7 +258,7 @@ def _create_transformer_decoder() -> TransformerDecoder:
         frozen=False,
         interaction_layer=None,
         dac_use_selfatt_ln=True,
-        resolution=1008,
+        resolution=HARDCODED_IMG_RESOLUTION,
         stride=14,
         use_act_checkpoint=True,
         presence_token=True,
@@ -564,7 +568,7 @@ def _create_vision_backbone(
 ) -> Sam3DualViTDetNeck:
     """Create SAM3 visual backbone with ViT and neck."""
     # Position encoding
-    position_encoding = _create_position_encoding(precompute_resolution=1008)
+    position_encoding = _create_position_encoding(precompute_resolution=HARDCODED_IMG_RESOLUTION)
     # ViT backbone
     vit_backbone: ViT = _create_vit_backbone(compile_mode=compile_mode)
     vit_neck: Sam3DualViTDetNeck = _create_vit_neck(
