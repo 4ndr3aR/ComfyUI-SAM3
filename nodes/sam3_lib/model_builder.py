@@ -1,5 +1,12 @@
 # Copyright (c) Meta Platforms, Inc. and affiliates. All Rights Reserved
 
+#HARDCODED_IMG_RESOLUTION=1008
+#HARDCODED_TRACKER_FEAT_SIZES=[72, 72]				# 1008 / 14 patch size = 72
+#HARDCODED_MASK_DOWNSAMPLE_INTERPOL_SIZE=[1152, 1152]		# ← was [1152, 1152], scale: 672*(1152/1008)≈768
+HARDCODED_IMG_RESOLUTION=672
+HARDCODED_TRACKER_FEAT_SIZES=[48, 48]				#  672 / 14 patch size = 48
+HARDCODED_MASK_DOWNSAMPLE_INTERPOL_SIZE=[768, 768]		# ← was [1152, 1152], scale: 672*(1152/1008)≈768
+
 import os
 from typing import Optional
 
@@ -115,9 +122,6 @@ from .model.tokenizer_ve import SimpleTokenizer
 from .model.vitdet import ViT
 from .model.vl_combiner import SAM3VLBackbone
 from .sam.transformer import RoPEAttention
-
-#HARDCODED_IMG_RESOLUTION=1008
-HARDCODED_IMG_RESOLUTION=672
 
 # Setup TensorFloat-32 for Ampere GPUs if available
 def _setup_tf32() -> None:
@@ -403,12 +407,12 @@ def _create_tracker_maskmem_backbone():
         normalize=True,
         scale=None,
         temperature=10000,
-        precompute_resolution=1008,
+        precompute_resolution=HARDCODED_IMG_RESOLUTION,
     )
 
     # Mask processing components
     mask_downsampler = SimpleMaskDownSampler(
-        kernel_size=3, stride=2, padding=1, interpol_size=[1152, 1152]
+        kernel_size=3, stride=2, padding=1, interpol_size=HARDCODED_MASK_DOWNSAMPLE_INTERPOL_SIZE
     )
 
     cx_block_layer = CXBlock(
@@ -440,7 +444,7 @@ def _create_tracker_transformer():
         downsample_rate=1,
         dropout=0.1,
         rope_theta=10000.0,
-        feat_sizes=[72, 72],
+        feat_sizes=HARDCODED_TRACKER_FEAT_SIZES,
         use_fa3=False,
         use_rope_real=False,
     )
@@ -453,7 +457,7 @@ def _create_tracker_transformer():
         dropout=0.1,
         kv_in_dim=64,
         rope_theta=10000.0,
-        feat_sizes=[72, 72],
+        feat_sizes=HARDCODED_TRACKER_FEAT_SIZES,
         rope_k_repeat=True,
         use_fa3=False,
         use_rope_real=False,
@@ -515,7 +519,7 @@ def build_tracker(
         backbone = SAM3VLBackbone(scalp=1, visual=vision_backbone, text=None)
     # Create the Tracker module
     model = Sam3TrackerPredictor(
-        image_size=1008,
+        image_size=HARDCODED_IMG_RESOLUTION,
         num_maskmem=7,
         backbone=backbone,
         backbone_stride=14,
@@ -898,10 +902,12 @@ def build_sam3_video_model(
     
         if is_finetuned:
             # Add detector. prefix to all keys so they map into the video model
+            print(f"[SAM3] Fine-tuned model detected, remapping stuff...")
             remapped_ckpt = {f"detector.{k}": v for k, v in ckpt.items()}
         else:
             # Keys should already be in detector.*/tracker.* format
             # (incompatible formats are rejected by _load_checkpoint_file)
+            print(f"[SAM3] Non-finetuned model detected, proceeding as usual...")
             remapped_ckpt = dict(ckpt)
     
         # Strip freqs_cis regardless of checkpoint origin
@@ -919,7 +925,8 @@ def build_sam3_video_model(
     
 	# ← now setting strict_state_dict_loading = False if loading a fine-tuned checkpoint at 672px resolution
         missing_keys, unexpected_keys = model.load_state_dict(
-            remapped_ckpt, strict=(strict_state_dict_loading if not is_finetuned else False) 
+            #remapped_ckpt, strict=(strict_state_dict_loading if not is_finetuned else False) 
+            remapped_ckpt, strict=False 
         )
         if is_finetuned:
             print(f"[SAM3] Fine-tuned model detected, loading with strict_state_dict_loading=False, here be dragons...")
