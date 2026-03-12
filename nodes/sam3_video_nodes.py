@@ -765,7 +765,7 @@ class SAM3VideoOutput:
                 img_tensor = torch.from_numpy(img_np)
 
             # Write frame directly to mmap (no list accumulation!)
-            frame_mmap[frame_idx] = img_np
+            frame_mmap[frame_idx] = (img_np * 255).clip(0, 255).astype('uint8')
 
             # Get mask for this frame
             if frame_idx in masks:
@@ -858,12 +858,12 @@ class SAM3VideoOutput:
                     vis_frame = self._draw_legend(vis_frame, num_objects, colors, obj_id=legend_obj_id, frame_scores=frame_scores)
 
                 # Write directly to mmap instead of appending to list
-                vis_mmap[frame_idx] = np.clip(vis_frame.numpy(), 0, 1)
-                mask_mmap[frame_idx] = frame_mask.cpu().numpy()
+                vis_mmap[frame_idx] = (np.clip(vis_frame.numpy(), 0, 1) * 255).astype('uint8')
+                mask_mmap[frame_idx] = (frame_mask.cpu().numpy() * 255).clip(0, 255).astype('uint8')
             else:
                 # No mask for this frame - use zeros
-                mask_mmap[frame_idx] = np.zeros((h, w), dtype=np.float32)
-                vis_mmap[frame_idx] = img_np
+                mask_mmap[frame_idx] = np.zeros((h, w), dtype='uint8')
+                vis_mmap[frame_idx] = (img_np * 255).clip(0, 255).astype('uint8')
 
             # Flush to disk periodically and free memory
             if frame_idx % 50 == 0 and frame_idx > 0:
@@ -881,9 +881,9 @@ class SAM3VideoOutput:
         # ============================================================
         # Convert mmap to torch tensors (backed by disk, minimal RAM!)
         # ============================================================
-        all_masks = torch.from_numpy(mask_mmap)
-        all_frames = torch.from_numpy(frame_mmap)
-        all_vis = torch.from_numpy(vis_mmap)
+        all_masks = torch.from_numpy(mask_mmap.astype('float32') / 255.0)
+        all_frames = torch.from_numpy(frame_mmap.astype('float32') / 255.0)
+        all_vis = torch.from_numpy(vis_mmap.astype('float32') / 255.0)
 
         print(f"[SAM3 Video] Output: {all_masks.shape[0]} masks, shape {all_masks.shape}")
         print(f"[SAM3 Video] Objects tracked: {num_objects}, plot_all_masks: {plot_all_masks}")
