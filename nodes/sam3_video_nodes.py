@@ -594,100 +594,99 @@ class SAM3VideoOutput:
     FUNCTION = "extract"
     CATEGORY = "SAM3/video"
 
+    # Pre-built 3x5 font bitmaps as numpy arrays (shape [5, 3]), computed once at class level.
+    # Each array is True where the pixel should be white.
+    _FONT = {c: np.array(pat, dtype=bool) for c, pat in {
+        '0': [[1,1,1],[1,0,1],[1,0,1],[1,0,1],[1,1,1]],
+        '1': [[0,1,0],[1,1,0],[0,1,0],[0,1,0],[1,1,1]],
+        '2': [[1,1,1],[0,0,1],[1,1,1],[1,0,0],[1,1,1]],
+        '3': [[1,1,1],[0,0,1],[1,1,1],[0,0,1],[1,1,1]],
+        '4': [[1,0,1],[1,0,1],[1,1,1],[0,0,1],[0,0,1]],
+        '5': [[1,1,1],[1,0,0],[1,1,1],[0,0,1],[1,1,1]],
+        '6': [[1,1,1],[1,0,0],[1,1,1],[1,0,1],[1,1,1]],
+        '7': [[1,1,1],[0,0,1],[0,0,1],[0,0,1],[0,0,1]],
+        '8': [[1,1,1],[1,0,1],[1,1,1],[1,0,1],[1,1,1]],
+        '9': [[1,1,1],[1,0,1],[1,1,1],[0,0,1],[1,1,1]],
+        ':': [[0,0,0],[0,1,0],[0,0,0],[0,1,0],[0,0,0]],
+        '.': [[0,0,0],[0,0,0],[0,0,0],[0,0,0],[0,1,0]],
+    }.items()}
+
     def _draw_legend(self, vis_frame, num_objects, colors, obj_id=-1, frame_scores=None):
-        """Draw a legend showing object IDs, colors, and confidence scores (sorted by confidence)."""
-        h, w = vis_frame.shape[:2]
+        """Draw a legend — fully vectorized with numpy slices, no Python pixel loops."""
+        # Work on a numpy array to avoid GIL-holding torch scalar assignments
+        frame_np = vis_frame.numpy()   # zero-copy view of the underlying storage
+        h, w = frame_np.shape[:2]
 
         # Legend parameters
         box_size = max(16, min(32, h // 20))
         padding = max(4, box_size // 4)
-        text_width = box_size * 6  # Space for "X: 0.95"
+        text_width = box_size * 6
         legend_item_height = box_size + padding
 
         # Build list of (obj_id, score) pairs
         if obj_id >= 0:
             items = [(obj_id, frame_scores[obj_id] if frame_scores is not None and obj_id < len(frame_scores) else None)]
         else:
-            items = []
-            for oid in range(num_objects):
-                score = frame_scores[oid] if frame_scores is not None and oid < len(frame_scores) else None
-                items.append((oid, score))
-            # Sort by score descending (highest confidence first), None scores go last
+            items = [(oid, frame_scores[oid] if frame_scores is not None and oid < len(frame_scores) else None)
+                     for oid in range(num_objects)]
             items.sort(key=lambda x: (x[1] is None, -(x[1] if x[1] is not None else 0)))
 
         num_items = len(items)
         legend_height = num_items * legend_item_height + padding
-        legend_width = box_size + text_width + padding * 2
+        legend_width  = box_size + text_width + padding * 2
 
-        # Position in top-left corner
-        start_x = padding
-        start_y = padding
+        start_x, start_y = padding, padding
+        y1 = start_y
+        y2 = min(start_y + legend_height, h)
+        x1 = start_x
+        x2 = min(start_x + legend_width, w)
 
-        # Draw semi-transparent background
-        bg_alpha = 0.7
-        for y in range(start_y, min(start_y + legend_height, h)):
-            for x in range(start_x, min(start_x + legend_width, w)):
-                vis_frame[y, x] = vis_frame[y, x] * (1 - bg_alpha) + torch.tensor([0.1, 0.1, 0.1]) * bg_alpha
+        # Semi-transparent dark background — one vectorized multiply over the slice
+        bg_color = np.array([0.1, 0.1, 0.1], dtype=np.float32)
+        frame_np[y1:y2, x1:x2] = (frame_np[y1:y2, x1:x2] * 0.3 + bg_color * 0.7)
 
-        # Draw legend items (already sorted by confidence)
         for idx, (oid, score) in enumerate(items):
             item_y = start_y + padding + idx * legend_item_height
+            iy1 = item_y
+            iy2 = min(item_y + box_size, h)
+            cx1 = start_x + padding
+            cx2 = min(cx1 + box_size, w)
 
-            # Draw color box
-            color = torch.tensor(colors[oid % len(colors)])
-            for y in range(item_y, min(item_y + box_size, h)):
-                for x in range(start_x + padding, min(start_x + padding + box_size, w)):
-                    vis_frame[y, x] = color
+            # Solid color swatch — single slice assignment
+            color_np = np.array(colors[oid % len(colors)], dtype=np.float32)
+            frame_np[iy1:iy2, cx1:cx2] = color_np
 
-            # Draw "X: 0.95" text using simple pixel font
+            # Text label
+            score_str = f"{oid}:{score:.2f}" if score is not None else f"{oid}"
             text_x = start_x + padding + box_size + padding
-            if score is not None:
-                # Format score to 2 decimal places
-                score_str = f"{oid}:{score:.2f}"
-            else:
-                score_str = f"{oid}"
-            self._draw_text(vis_frame, score_str, text_x, item_y, box_size)
+            self._draw_text_np(frame_np, score_str, text_x, item_y, box_size)
 
+        # Write result back into the torch tensor in one shot
+        vis_frame.copy_(torch.from_numpy(frame_np))
         return vis_frame
 
-    def _draw_text(self, img, text, x, y, size):
-        """Draw simple text using basic shapes (no font dependencies)."""
-        # Simple 3x5 pixel font for digits and punctuation
-        chars = {
-            '0': [[1,1,1], [1,0,1], [1,0,1], [1,0,1], [1,1,1]],
-            '1': [[0,1,0], [1,1,0], [0,1,0], [0,1,0], [1,1,1]],
-            '2': [[1,1,1], [0,0,1], [1,1,1], [1,0,0], [1,1,1]],
-            '3': [[1,1,1], [0,0,1], [1,1,1], [0,0,1], [1,1,1]],
-            '4': [[1,0,1], [1,0,1], [1,1,1], [0,0,1], [0,0,1]],
-            '5': [[1,1,1], [1,0,0], [1,1,1], [0,0,1], [1,1,1]],
-            '6': [[1,1,1], [1,0,0], [1,1,1], [1,0,1], [1,1,1]],
-            '7': [[1,1,1], [0,0,1], [0,0,1], [0,0,1], [0,0,1]],
-            '8': [[1,1,1], [1,0,1], [1,1,1], [1,0,1], [1,1,1]],
-            '9': [[1,1,1], [1,0,1], [1,1,1], [0,0,1], [1,1,1]],
-            ':': [[0,0,0], [0,1,0], [0,0,0], [0,1,0], [0,0,0]],
-            '.': [[0,0,0], [0,0,0], [0,0,0], [0,0,0], [0,1,0]],
-        }
-
-        h, w = img.shape[:2]
+    def _draw_text_np(self, img_np, text, x, y, size):
+        """Render bitmap text onto a numpy HWC float32 array — no Python pixel loops."""
+        h, w = img_np.shape[:2]
         scale = max(1, size // 6)
         char_width = 4 * scale
+        white = np.array([1.0, 1.0, 1.0], dtype=np.float32)
 
         curr_x = x
         for char in text:
-            if char in chars:
-                pattern = chars[char]
-                for row_idx, row in enumerate(pattern):
-                    for col_idx, pixel in enumerate(row):
-                        if pixel:
-                            for sy in range(scale):
-                                for sx in range(scale):
-                                    px = curr_x + col_idx * scale + sx
-                                    py = y + row_idx * scale + sy
-                                    if 0 <= px < w and 0 <= py < h:
-                                        img[py, px] = torch.tensor([1.0, 1.0, 1.0])
+            glyph = self._FONT.get(char)
+            if glyph is not None:
+                # glyph shape: [5, 3] bool → scale to [5*scale, 3*scale] via repeat
+                scaled = np.repeat(np.repeat(glyph, scale, axis=0), scale, axis=1)  # [5s, 3s]
+                rows, cols = np.where(scaled)   # pixel coordinates of set bits
+                py = y + rows
+                px = curr_x + cols
+                # Clip to image bounds
+                mask = (py >= 0) & (py < h) & (px >= 0) & (px < w)
+                img_np[py[mask], px[mask]] = white
                 curr_x += char_width
             elif char == ' ':
-                curr_x += char_width  # Space
+                curr_x += char_width
 
     def extract(self, masks, video_state, scores=None, obj_id=-1, plot_all_masks=True):
         """Extract all masks as a batch [N, H, W] using memory-mapped streaming.
@@ -906,9 +905,9 @@ class SAM3VideoOutput:
         # Convert mmap to torch tensors (backed by disk, minimal RAM!)
         # Scale uint8 [0,255] back to float32 [0,1] as ComfyUI expects.
         # ============================================================
-        all_masks = torch.from_numpy(mask_mmap.astype('float32') / 255.0)
+        all_masks  = torch.from_numpy(mask_mmap.astype('float32')  / 255.0)
         all_frames = torch.from_numpy(frame_mmap.astype('float32') / 255.0)
-        all_vis = torch.from_numpy(vis_mmap.astype('float32') / 255.0)
+        all_vis    = torch.from_numpy(vis_mmap.astype('float32')   / 255.0)
 
         print(f"[SAM3 Video] Output: {all_masks.shape[0]} masks, shape {all_masks.shape}")
         print(f"[SAM3 Video] Objects tracked: {num_objects}, plot_all_masks: {plot_all_masks}")
