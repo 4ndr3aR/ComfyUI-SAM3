@@ -12,10 +12,13 @@ Key design principles:
 5. No manual SAM3CloseVideoSession needed
 """
 import gc
+import os
+import threading
 import torch
 import numpy as np
 from pathlib import Path
 from typing import Optional, Tuple
+from concurrent.futures import ThreadPoolExecutor, as_completed
 
 import folder_paths
 import comfy.model_management
@@ -693,7 +696,6 @@ class SAM3VideoOutput:
         Memory usage is ~100MB regardless of video size (vs 32GB+ for 551 frames at 1080p).
         """
         from PIL import Image
-        import os
 
         # Create cache key
         cache_key = (id(masks), video_state.session_uuid, id(scores), obj_id, plot_all_masks)
@@ -747,13 +749,31 @@ class SAM3VideoOutput:
             [0.5, 0.0, 1.0],   # Purple
         ]
 
-        # Track number of objects for legend
+        # Pre-scan masks to know num_objects before the parallel loop starts.
+        # This avoids needing a lock around shared mutable state inside threads.
         num_objects = 0
+        for fm in masks.values():
+            if isinstance(fm, np.ndarray):
+                fm = torch.from_numpy(fm)
+            if fm.dim() == 4:
+                fm = fm.squeeze(0)
+            if fm.dim() == 3 and fm.shape[0] >= 1:
+                num_objects = max(num_objects, fm.shape[0])
+            elif fm.numel() > 0:
+                num_objects = max(num_objects, 1)
 
         # ============================================================
-        # Process ONE frame at a time, write directly to disk
+        # Process frames in parallel across all available cores.
+        # Each thread works on a private copy of its frame data and
+        # writes to a unique mmap slice - no shared mutable state.
+        # numpy/torch ops release the GIL so threads run truly in
+        # parallel on separate cores.
         # ============================================================
-        for frame_idx in range(num_frames):
+        _progress = [0]
+        _progress_lock = threading.Lock()
+        num_workers = min(os.cpu_count() or 8, num_frames)
+
+        def _process_frame(frame_idx):
             # Load original frame from disk (already stored as JPEG)
             frame_path_jpg = os.path.join(video_state.temp_dir, f"{frame_idx:05d}.jpg")
             if os.path.exists(frame_path_jpg):
@@ -764,7 +784,7 @@ class SAM3VideoOutput:
                 img_np = np.zeros((h, w, 3), dtype=np.float32)
                 img_tensor = torch.from_numpy(img_np)
 
-            # Write frame directly to mmap (no list accumulation!)
+            # Write frame directly to mmap (scaled to uint8, 4x smaller than float32)
             frame_mmap[frame_idx] = (img_np * 255).clip(0, 255).astype('uint8')
 
             # Get mask for this frame
@@ -788,7 +808,6 @@ class SAM3VideoOutput:
                     frame_mask = torch.zeros(h, w)
                     # vis_frame stays as original image
                 elif frame_mask.dim() == 3 and frame_mask.shape[0] >= 1:
-                    num_objects = max(num_objects, frame_mask.shape[0])
                     combined_mask = torch.zeros(h, w)
 
                     if plot_all_masks:
@@ -832,7 +851,6 @@ class SAM3VideoOutput:
                     frame_mask = frame_mask.float()
                     if frame_mask.numel() > 0 and frame_mask.max() > 1.0:
                         frame_mask = frame_mask / 255.0
-                    num_objects = max(num_objects, 1)
                     color = torch.tensor(colors[0])
                     mask_rgb = frame_mask.unsqueeze(-1) * color.view(1, 1, 3)
                     vis_frame = vis_frame * (1 - 0.5 * frame_mask.unsqueeze(-1)) + 0.5 * mask_rgb
@@ -857,21 +875,27 @@ class SAM3VideoOutput:
                             frame_scores = list(frame_scores_tensor)
                     vis_frame = self._draw_legend(vis_frame, num_objects, colors, obj_id=legend_obj_id, frame_scores=frame_scores)
 
-                # Write directly to mmap instead of appending to list
-                vis_mmap[frame_idx] = (np.clip(vis_frame.numpy(), 0, 1) * 255).astype('uint8')
+                # Write directly to mmap (scaled to uint8)
+                vis_mmap[frame_idx]  = (np.clip(vis_frame.numpy(), 0, 1) * 255).astype('uint8')
                 mask_mmap[frame_idx] = (frame_mask.cpu().numpy() * 255).clip(0, 255).astype('uint8')
             else:
                 # No mask for this frame - use zeros
                 mask_mmap[frame_idx] = np.zeros((h, w), dtype='uint8')
-                vis_mmap[frame_idx] = (img_np * 255).clip(0, 255).astype('uint8')
+                vis_mmap[frame_idx]  = (img_np * 255).clip(0, 255).astype('uint8')
 
-            # Flush to disk periodically and free memory
-            if frame_idx % 50 == 0 and frame_idx > 0:
-                mask_mmap.flush()
-                frame_mmap.flush()
-                vis_mmap.flush()
-                gc.collect()
-                print(f"[SAM3 Video] Processed {frame_idx}/{num_frames} frames")
+            # Progress reporting - the lock only guards the counter+print,
+            # not any of the heavy per-frame work above.
+            with _progress_lock:
+                _progress[0] += 1
+                done = _progress[0]
+            if done % 50 == 0 or done == num_frames:
+                print(f"[SAM3 Video] Processed {done}/{num_frames} frames")
+
+        print(f"[SAM3 Video] Parallel extraction using {num_workers} workers")
+        with ThreadPoolExecutor(max_workers=num_workers) as executor:
+            futures = {executor.submit(_process_frame, i): i for i in range(num_frames)}
+            for future in as_completed(futures):
+                future.result()  # re-raise any exception from worker threads
 
         # Final flush
         mask_mmap.flush()
@@ -880,6 +904,7 @@ class SAM3VideoOutput:
 
         # ============================================================
         # Convert mmap to torch tensors (backed by disk, minimal RAM!)
+        # Scale uint8 [0,255] back to float32 [0,1] as ComfyUI expects.
         # ============================================================
         all_masks = torch.from_numpy(mask_mmap.astype('float32') / 255.0)
         all_frames = torch.from_numpy(frame_mmap.astype('float32') / 255.0)
