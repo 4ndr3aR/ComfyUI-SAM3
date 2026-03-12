@@ -726,12 +726,9 @@ class SAM3VideoOutput:
         vis_path = os.path.join(mmap_dir, "vis.mmap")
 
         # Create memory-mapped arrays (written to disk, not RAM)
-        mask_mmap = np.memmap(mask_path, dtype='float32', mode='w+',
-                              shape=(num_frames, h, w))
-        frame_mmap = np.memmap(frame_path, dtype='float32', mode='w+',
-                               shape=(num_frames, h, w, 3))
-        vis_mmap = np.memmap(vis_path, dtype='float32', mode='w+',
-                             shape=(num_frames, h, w, 3))
+        mask_mmap  = np.memmap(mask_path,	dtype='float32', mode='w+', shape=(num_frames, h, w))
+        frame_mmap = np.memmap(frame_path,	dtype='float32', mode='w+', shape=(num_frames, h, w, 3))
+        vis_mmap   = np.memmap(vis_path,	dtype='float32', mode='w+', shape=(num_frames, h, w, 3))
 
         print(f"[SAM3 Video] Streaming {num_frames} frames to disk: {mmap_dir}")
 
