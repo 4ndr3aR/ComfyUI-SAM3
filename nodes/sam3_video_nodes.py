@@ -13,12 +13,47 @@ Key design principles:
 """
 import gc
 import os
+import time
 import threading
+import datetime
 import torch
 import numpy as np
 from pathlib import Path
 from typing import Optional, Tuple
-from concurrent.futures import ThreadPoolExecutor, as_completed
+from concurrent.futures import ThreadPoolExecutor, wait as futures_wait, ALL_COMPLETED
+
+
+# =============================================================================
+# Logging helpers — timestamped + ANSI color
+# =============================================================================
+class _C:
+    """ANSI color codes."""
+    RESET  = "\033[0m"
+    BOLD   = "\033[1m"
+    RED    = "\033[91m"
+    GREEN  = "\033[92m"
+    YELLOW = "\033[93m"
+    BLUE   = "\033[94m"
+    CYAN   = "\033[96m"
+    WHITE  = "\033[97m"
+    GREY   = "\033[90m"
+    BG_RED = "\033[41m"
+
+
+def _ts() -> str:
+    """Return a fixed-width timestamp: '2026-03-13 16.27.34'"""
+    return datetime.datetime.now().strftime("%Y-%m-%d %H.%M.%S")
+
+
+def _log(msg: str, color: str = "") -> None:
+    """Print with timestamp prefix and optional ANSI color."""
+    reset = _C.RESET if color else ""
+    print(f"{_C.GREY}{_ts()}{_C.RESET} {color}{msg}{reset}")
+
+
+def _hi(value, color: str = _C.CYAN) -> str:
+    """Wrap a value in bold color for inline highlighting."""
+    return f"{_C.BOLD}{color}{value}{_C.RESET}"
 
 import folder_paths
 import comfy.model_management
@@ -74,13 +109,14 @@ def print_vram(label: str, detailed: bool = False):
     if torch.cuda.is_available():
         alloc = torch.cuda.memory_allocated() / 1024**3
         reserved = torch.cuda.memory_reserved() / 1024**3
-        print(f"[VRAM] {label}: {alloc:.2f}GB allocated, {reserved:.2f}GB reserved")
+        _log(f"[VRAM] {label}: {_hi(f'{alloc:.2f}GB', _C.YELLOW)} allocated, "
+             f"{_hi(f'{reserved:.2f}GB', _C.YELLOW)} reserved")
         if detailed:
             # Print memory stats breakdown
             stats = torch.cuda.memory_stats()
-            print(f"[VRAM]   Active: {stats.get('active_bytes.all.current', 0) / 1024**3:.2f}GB")
-            print(f"[VRAM]   Inactive: {stats.get('inactive_split_bytes.all.current', 0) / 1024**3:.2f}GB")
-            print(f"[VRAM]   Allocated retries: {stats.get('num_alloc_retries', 0)}")
+            _log(f"[VRAM]   Active:            {stats.get('active_bytes.all.current', 0) / 1024**3:.2f}GB")
+            _log(f"[VRAM]   Inactive:          {stats.get('inactive_split_bytes.all.current', 0) / 1024**3:.2f}GB")
+            _log(f"[VRAM]   Allocated retries: {stats.get('num_alloc_retries', 0)}")
 
 
 # =============================================================================
@@ -236,10 +272,10 @@ class SAM3VideoSegmentation:
         # Check if we have cached result
         if cache_key in SAM3VideoSegmentation._cache:
             cached = SAM3VideoSegmentation._cache[cache_key]
-            print(f"[SAM3 Video] CACHE HIT - returning cached video_state for key={cache_key[:8]}, session={cached.session_uuid[:8]}")
+            _log(f"[SAM3 Video] CACHE HIT — returning cached video_state for key={cache_key[:8]}, session={cached.session_uuid[:8]}", _C.GREEN)
             return (cached,)
 
-        print(f"[SAM3 Video] CACHE MISS - computing new video_state for key={cache_key[:8]}")
+        _log(f"[SAM3 Video] CACHE MISS — computing new video_state for key={cache_key[:8]}")
         print_vram("Before video segmentation")
 
         # 1. Initialize video state
@@ -251,9 +287,9 @@ class SAM3VideoSegmentation:
             config=config,
         )
 
-        print(f"[SAM3 Video] Initialized session {video_state.session_uuid[:8]}")
-        print(f"[SAM3 Video] Frames: {video_state.num_frames}, Size: {video_state.width}x{video_state.height}")
-        print(f"[SAM3 Video] Prompt mode: {prompt_mode}")
+        _log(f"[SAM3 Video] Initialized session {_hi(video_state.session_uuid[:8])}")
+        _log(f"[SAM3 Video] Frames: {_hi(video_state.num_frames)}, Size: {_hi(f'{video_state.width}x{video_state.height}')}")
+        _log(f"[SAM3 Video] Prompt mode: {_hi(prompt_mode, _C.YELLOW)}")
 
         # 2. Add prompts based on mode (mutually exclusive)
         obj_id = 1
@@ -266,10 +302,10 @@ class SAM3VideoSegmentation:
                     if text:
                         prompt = VideoPrompt.create_text(frame_idx, obj_id, text)
                         video_state = video_state.with_prompt(prompt)
-                        print(f"[SAM3 Video] Added text prompt: obj={obj_id}, text='{text}'")
+                        _log(f"[SAM3 Video] Added text prompt: obj={_hi(obj_id)}, text='{_hi(text, _C.YELLOW)}'")
                         obj_id += 1
             else:
-                print("[SAM3 Video] Warning: text mode selected but no text_prompt provided")
+                _log("[SAM3 Video] Warning: text mode selected but no text_prompt provided", _C.YELLOW)
 
         elif prompt_mode == "point":
             # Point mode: combine positive and negative points
@@ -291,10 +327,10 @@ class SAM3VideoSegmentation:
                 video_state = video_state.with_prompt(prompt)
                 pos_count = len(positive_points.get("points", [])) if positive_points else 0
                 neg_count = len(negative_points.get("points", [])) if negative_points else 0
-                print(f"[SAM3 Video] Added point prompt: obj={obj_id}, "
-                      f"positive={pos_count}, negative={neg_count}")
+                _log(f"[SAM3 Video] Added point prompt: obj={_hi(obj_id)}, "
+                      f"positive={_hi(pos_count, _C.GREEN)}, negative={_hi(neg_count, _C.RED)}")
             else:
-                print("[SAM3 Video] Warning: point mode selected but no points provided")
+                _log("[SAM3 Video] Warning: point mode selected but no points provided", _C.YELLOW)
 
         elif prompt_mode == "box":
             # Box mode: add positive and/or negative boxes
@@ -309,7 +345,7 @@ class SAM3VideoSegmentation:
                 y2 = cy + h/2
                 prompt = VideoPrompt.create_box(frame_idx, obj_id, [x1, y1, x2, y2], is_positive=True)
                 video_state = video_state.with_prompt(prompt)
-                print(f"[SAM3 Video] Added positive box: obj={obj_id}, "
+                _log(f"[SAM3 Video] Added positive box: obj={_hi(obj_id)}, "
                       f"box=[{x1:.3f}, {y1:.3f}, {x2:.3f}, {y2:.3f}]")
                 has_boxes = True
 
@@ -322,18 +358,18 @@ class SAM3VideoSegmentation:
                 y2 = cy + h/2
                 prompt = VideoPrompt.create_box(frame_idx, obj_id, [x1, y1, x2, y2], is_positive=False)
                 video_state = video_state.with_prompt(prompt)
-                print(f"[SAM3 Video] Added negative box: obj={obj_id}, "
+                _log(f"[SAM3 Video] Added negative box: obj={_hi(obj_id)}, "
                       f"box=[{x1:.3f}, {y1:.3f}, {x2:.3f}, {y2:.3f}]")
                 has_boxes = True
 
             if not has_boxes:
-                print("[SAM3 Video] Warning: box mode selected but no boxes provided")
+                _log("[SAM3 Video] Warning: box mode selected but no boxes provided", _C.YELLOW)
 
         # Validate at least one prompt was added
         if len(video_state.prompts) == 0:
-            print(f"[SAM3 Video] Warning: No prompts added for mode '{prompt_mode}'")
+            _log(f"[SAM3 Video] Warning: No prompts added for mode '{prompt_mode}'", _C.YELLOW)
 
-        print(f"[SAM3 Video] Total prompts: {len(video_state.prompts)}")
+        _log(f"[SAM3 Video] Total prompts: {_hi(len(video_state.prompts))}")
         print_vram("After video segmentation")
 
         # Cache the result
@@ -411,10 +447,10 @@ class SAM3Propagate:
         # Check if we have cached result
         if cache_key in SAM3Propagate._cache:
             cached = SAM3Propagate._cache[cache_key]
-            print(f"[SAM3 Propagate] CACHE HIT - returning cached result for session={video_state.session_uuid[:8]}")
+            _log(f"[SAM3 Propagate] CACHE HIT — returning cached result for session={_hi(video_state.session_uuid[:8])}", _C.GREEN)
             # Still need to handle offload if requested
             if offload_model:
-                print("[SAM3 Video] Offloading model to CPU to free VRAM...")
+                _log("[SAM3 Video] Offloading model to CPU to free VRAM...", _C.YELLOW)
                 if hasattr(sam3_model, 'model'):
                     sam3_model.model.cpu()
                 gc.collect()
@@ -423,7 +459,7 @@ class SAM3Propagate:
                 print_vram("After model offload")
             return cached
 
-        print(f"[SAM3 Propagate] CACHE MISS - running propagation for session={video_state.session_uuid[:8]}")
+        _log(f"[SAM3 Propagate] CACHE MISS — running propagation for session={_hi(video_state.session_uuid[:8])}")
 
         if len(video_state.prompts) == 0:
             raise ValueError("[SAM3 Video] No prompts added. Add point, box, or text prompts before propagating.")
@@ -433,8 +469,10 @@ class SAM3Propagate:
             device = torch.device('cuda' if torch.cuda.is_available() else 'cpu')
             sam3_model.model.to(device)
 
-        print(f"[SAM3 Video] Starting propagation: frames {start_frame} to {end_frame if end_frame >= 0 else 'end'}")
-        print(f"[SAM3 Video] Prompts: {len(video_state.prompts)}")
+        end_label = end_frame if end_frame >= 0 else 'end'
+        _log(f"[SAM3 Video] Starting propagation: frames {_hi(start_frame)} → {_hi(end_label)}, "
+             f"direction={_hi(direction, _C.YELLOW)}")
+        _log(f"[SAM3 Video] Prompts: {_hi(len(video_state.prompts))}")
         print_vram("Before propagation start")
 
         # Determine frame range
@@ -454,7 +492,7 @@ class SAM3Propagate:
         # Run ALL inference inside autocast context for dtype consistency
         # SAM3 requires bf16/fp16 - wrap reconstruction AND propagation
         masks_dict = {}
-        scores_dict = {}  # Store confidence scores per frame
+        scores_dict = {}
         # Use autocast with dtype based on GPU capability (bf16 for Ampere+, fp16 for Volta/Turing)
         autocast_context = _get_autocast_context()
         with autocast_context:
@@ -505,14 +543,14 @@ class SAM3Propagate:
                         gc.collect()
 
             except Exception as e:
-                print(f"[SAM3 Video] Propagation error: {e}")
+                _log(f"[SAM3 Video] Propagation error: {e}", _C.RED)
                 import traceback
                 traceback.print_exc()
                 raise
 
         print_vram("After propagation loop")
-        print(f"[SAM3 Video] Propagation complete: {len(masks_dict)} frames processed")
-        print(f"[SAM3 Video] Frames with scores: {len(scores_dict)}")
+        _log(f"[SAM3 Video] Propagation complete: {_hi(len(masks_dict))} frames processed")
+        _log(f"[SAM3 Video] Frames with scores: {_hi(len(scores_dict))}")
 
         # Clean up
         gc.collect()
@@ -521,7 +559,7 @@ class SAM3Propagate:
 
         # Offload model to CPU if requested (Issue #28)
         if offload_model:
-            print("[SAM3 Video] Offloading model to CPU to free VRAM...")
+            _log("[SAM3 Video] Offloading model to CPU to free VRAM...", _C.YELLOW)
             if hasattr(sam3_model, 'model'):
                 sam3_model.model.cpu()
             # Clear inference state cache to free GPU memory
@@ -701,16 +739,16 @@ class SAM3VideoOutput:
 
         # Check if we have cached result
         if cache_key in SAM3VideoOutput._cache:
-            print(f"[SAM3 Video Output] CACHE HIT - returning cached result for session={video_state.session_uuid[:8]}")
+            _log(f"[SAM3 Video Output] CACHE HIT — returning cached result for session={_hi(video_state.session_uuid[:8])}", _C.GREEN)
             return SAM3VideoOutput._cache[cache_key]
 
-        print(f"[SAM3 Video Output] CACHE MISS - streaming extraction for session={video_state.session_uuid[:8]}")
+        _log(f"[SAM3 Video Output] CACHE MISS — streaming extraction for session={_hi(video_state.session_uuid[:8])}")
         print_vram("Before extract")
         h, w = video_state.height, video_state.width
         num_frames = video_state.num_frames
 
         if not masks:
-            print("[SAM3 Video] No masks to extract")
+            _log("[SAM3 Video] No masks to extract", _C.YELLOW)
             empty_mask = torch.zeros(num_frames, h, w)
             empty_frames = torch.zeros(num_frames, h, w, 3)
             return (empty_mask, empty_frames, empty_frames)
@@ -722,19 +760,17 @@ class SAM3VideoOutput:
         mmap_dir = os.path.join(video_state.temp_dir, "mmap_output")
         os.makedirs(mmap_dir, exist_ok=True)
 
-        mask_path = os.path.join(mmap_dir, "masks.mmap")
+        mask_path  = os.path.join(mmap_dir, "masks.mmap")
         frame_path = os.path.join(mmap_dir, "frames.mmap")
-        vis_path = os.path.join(mmap_dir, "vis.mmap")
+        vis_path   = os.path.join(mmap_dir, "vis.mmap")
 
         # Create memory-mapped arrays (written to disk, not RAM)
-        #mask_mmap  = np.memmap(mask_path,	dtype='float32', mode='w+', shape=(num_frames, h, w))
-        #frame_mmap = np.memmap(frame_path,	dtype='float32', mode='w+', shape=(num_frames, h, w, 3))
-        #vis_mmap   = np.memmap(vis_path,	dtype='float32', mode='w+', shape=(num_frames, h, w, 3))
-        mask_mmap  = np.memmap(mask_path,	dtype='uint8',  mode='w+', shape=(num_frames, h, w))
-        frame_mmap = np.memmap(frame_path,	dtype='uint8',  mode='w+', shape=(num_frames, h, w, 3))
-        vis_mmap   = np.memmap(vis_path,	dtype='uint8',  mode='w+', shape=(num_frames, h, w, 3))
+        mask_mmap  = np.memmap(mask_path,  dtype='uint8', mode='w+', shape=(num_frames, h, w))
+        frame_mmap = np.memmap(frame_path, dtype='uint8', mode='w+', shape=(num_frames, h, w, 3))
+        vis_mmap   = np.memmap(vis_path,   dtype='uint8', mode='w+', shape=(num_frames, h, w, 3))
 
-        print(f"[SAM3 Video] Streaming {num_frames} frames to disk: {mmap_dir}")
+        _log(f"[SAM3 Video] Streaming {_hi(num_frames)} frames "
+             f"({_hi(f'{w}x{h}')}) to disk: {_hi(mmap_dir, _C.BLUE)}")
 
         # Color palette for multiple objects (RGB, 0-1 range)
         colors = [
@@ -888,29 +924,75 @@ class SAM3VideoOutput:
                 _progress[0] += 1
                 done = _progress[0]
             if done % 50 == 0 or done == num_frames:
-                print(f"[SAM3 Video] Processed {done}/{num_frames} frames")
+                _log(f"[SAM3 Video] Processed {_hi(f'{done}/{num_frames}')} frames")
 
-        print(f"[SAM3 Video] Parallel extraction using {num_workers} workers")
-        with ThreadPoolExecutor(max_workers=num_workers) as executor:
-            futures = {executor.submit(_process_frame, i): i for i in range(num_frames)}
-            for future in as_completed(futures):
-                future.result()  # re-raise any exception from worker threads
+        # ============================================================
+        # Submit all frames and wait — with per-future diagnostics.
+        #
+        # WHY NOT `with ThreadPoolExecutor(...) as executor`?
+        # The context manager calls shutdown(wait=True) on __exit__,
+        # which can hang if any future raised an exception and the
+        # executor is still draining its internal work queue.
+        # Instead we submit everything, wait with a generous timeout,
+        # then report exactly which frames are still pending.
+        # ============================================================
+        _log(f"[SAM3 Video] Parallel extraction using {_hi(num_workers)} workers")
+        executor = ThreadPoolExecutor(max_workers=num_workers)
+        futures = {executor.submit(_process_frame, i): i for i in range(num_frames)}
 
-        # Final flush
+        _log("[SAM3 Video] Waiting for all frame workers to complete...")
+        t_wait_start = time.time()
+        done_fs, stuck_fs = futures_wait(futures, timeout=300, return_when=ALL_COMPLETED)
+
+        if stuck_fs:
+            stuck_ids = sorted(futures[f] for f in stuck_fs)
+            _log(f"[SAM3 Video] {_C.BG_RED}WARNING{_C.RESET}{_C.RED} "
+                 f"{len(stuck_fs)} frames timed out after 300s: {stuck_ids}{_C.RESET}", _C.RED)
+            # Cancel what we can and move on — partial output is better than hanging forever
+            for f in stuck_fs:
+                f.cancel()
+        else:
+            elapsed = time.time() - t_wait_start
+            _log(f"[SAM3 Video] All {_hi(len(done_fs))} workers finished in {_hi(f'{elapsed:.1f}s', _C.GREEN)}")
+
+        # Re-raise the first exception from any worker (if any)
+        exceptions = []
+        for f in done_fs:
+            exc = f.exception()
+            if exc is not None:
+                exceptions.append(exc)
+        if exceptions:
+            _log(f"[SAM3 Video] {len(exceptions)} worker(s) raised exceptions — re-raising first", _C.RED)
+            raise exceptions[0]
+
+        # Shut down without blocking (workers are already done)
+        executor.shutdown(wait=False)
+
+        # ============================================================
+        # Flush — these are fast (just OS dirty-page writeback)
+        # ============================================================
+        _log("[SAM3 Video] Flushing mmaps to disk...")
+        t0 = time.time()
         mask_mmap.flush()
         frame_mmap.flush()
         vis_mmap.flush()
+        _log(f"[SAM3 Video] Flush complete in {_hi(f'{time.time()-t0:.1f}s', _C.GREEN)}")
 
         # ============================================================
         # Convert mmap to torch tensors (backed by disk, minimal RAM!)
         # Scale uint8 [0,255] back to float32 [0,1] as ComfyUI expects.
         # ============================================================
+        _log("[SAM3 Video] Converting uint8 mmaps → float32 tensors (disk read + RAM alloc)...")
+        t0 = time.time()
         all_masks  = torch.from_numpy(mask_mmap.astype('float32')  / 255.0)
         all_frames = torch.from_numpy(frame_mmap.astype('float32') / 255.0)
         all_vis    = torch.from_numpy(vis_mmap.astype('float32')   / 255.0)
+        _log(f"[SAM3 Video] Tensor conversion complete in {_hi(f'{time.time()-t0:.1f}s', _C.GREEN)}")
 
-        print(f"[SAM3 Video] Output: {all_masks.shape[0]} masks, shape {all_masks.shape}")
-        print(f"[SAM3 Video] Objects tracked: {num_objects}, plot_all_masks: {plot_all_masks}")
+        _log(f"[SAM3 Video] Output: {_hi(all_masks.shape[0])} masks, "
+             f"shape {_hi(list(all_masks.shape), _C.CYAN)}")
+        _log(f"[SAM3 Video] Objects tracked: {_hi(num_objects, _C.GREEN)}, "
+             f"plot_all_masks: {_hi(plot_all_masks, _C.YELLOW)}")
         print_vram("After extract")
 
         # Cache the result (tensors backed by mmap files - minimal RAM)
