@@ -20,7 +20,7 @@ from ..logger import get_logger
 from ..model.box_ops import fast_diag_box_iou
 from ..model.data_misc import BatchedDatapoint
 from ..model.sam3_tracker_utils import fill_holes_in_mask_scores, mask_to_box
-from ..perflib.masks_ops import mask_iou
+from ..perflib.masks_ops import mask_iou, mask_iou_chunked
 from .masks_ops import rle_encode
 from torch import nn, Tensor
 
@@ -1036,7 +1036,8 @@ class Sam3VideoBase(nn.Module):
         if len(obj_ids) <= 1:
             return to_suppress
 
-        iou = mask_iou(binary_low_res_masks, binary_low_res_masks)  # [N,N]
+        #iou = mask_iou(binary_low_res_masks, binary_low_res_masks)  # [N,N]
+        iou = mask_iou_chunked(binary_low_res_masks, binary_low_res_masks)  # [N,N]
 
         # Create masks for upper triangular matrix (i < j) and IoU threshold
         mask_iou_thresh = (
@@ -1244,7 +1245,8 @@ class Sam3VideoBase(nn.Module):
 
         det_masks_binary = det_masks > 0
         trk_masks_binary = trk_masks > 0
-        ious = mask_iou(det_masks_binary, trk_masks_binary)  # (N, M)
+        #ious = mask_iou(det_masks_binary, trk_masks_binary)  # (N, M)
+        ious = mask_iou_chunked(det_masks_binary, trk_masks_binary)  # (N, M)
 
         ious_np = ious.cpu().numpy()
         if self.o2o_matching_masklets_enable:

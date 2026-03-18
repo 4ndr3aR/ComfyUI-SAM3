@@ -2,6 +2,8 @@
 
 import torch
 
+from ..logger import get_logger
+logger = get_logger(__name__)
 
 def masks_to_boxes(masks: torch.Tensor, obj_ids: list[int]):
     with torch.autograd.profiler.record_function("perflib: masks_to_boxes"):
@@ -45,7 +47,7 @@ def masks_to_boxes(masks: torch.Tensor, obj_ids: list[int]):
         return bounding_boxes
 
 
-def mask_iou(pred_masks: torch.Tensor, gt_masks: torch.Tensor) -> torch.Tensor:
+def mask_iou(pred_masks: torch.Tensor, gt_masks: torch.Tensor, debug=False) -> torch.Tensor:
     """
     Compute the IoU (Intersection over Union) between predicted masks and ground truth masks.
     Args:
@@ -61,9 +63,51 @@ def mask_iou(pred_masks: torch.Tensor, gt_masks: torch.Tensor) -> torch.Tensor:
     # Flatten masks: (N, 1, H*W) and (1, M, H*W)
     pred_flat = pred_masks.view(N, 1, H * W)
     gt_flat = gt_masks.view(1, M, H * W)
+    if debug:
+        #print(f'pred_flat: {pred_flat.shape} - gt_flat: {gt_flat.shape}')  # shape: (N, 1, H*W) and (1, M, H*W)
+        logger.info(f'pred_flat: {pred_flat.shape} - gt_flat: {gt_flat.shape}')  # shape: (N, 1, H*W) and (1, M, H*W)
 
     # Compute intersection and union: (N, M)
     intersection = (pred_flat & gt_flat).sum(dim=2).float()
     union = (pred_flat | gt_flat).sum(dim=2).float()
     ious = intersection / union.clamp(min=1)
     return ious  # shape: (N, M)
+
+def mask_iou_chunked(pred_masks: torch.Tensor, gt_masks: torch.Tensor, chunk_size=32, debug=True) -> torch.Tensor:
+	"""
+	Chunked drop-in replacement for mask_iou.
+	Peak extra VRAM: chunk_size × M × H*W instead of N × M × H*W.
+	"""
+	if debug:
+		logger.info(f'mask_iou_chunked() running with chunk_size={chunk_size}')
+	assert pred_masks.dtype == gt_masks.dtype == torch.bool, f"Expected boolean tensors, got {pred_masks.dtype} / {gt_masks.dtype}"
+	N, H, W = pred_masks.shape
+	M       = gt_masks.shape[0]
+	HW      = H * W
+
+	pred_flat = pred_masks.view(N, HW)   # (N, H*W) – no broadcast dim yet
+	gt_flat   = gt_masks.view(M, HW)     # (M, H*W)
+
+	ious = torch.zeros(N, M, device=pred_masks.device, dtype=torch.float32)
+	if debug:
+		logger.info(f'pred_flat: {pred_flat.shape} - gt_flat: {gt_flat.shape} - ious: {ious.shape}')
+
+	for row_start in range(0, N, chunk_size):
+		row_end   = min(row_start + chunk_size, N)
+		p_chunk   = pred_flat[row_start:row_end].unsqueeze(1)  # (cs, 1, H*W)
+		g_chunk   = gt_flat.unsqueeze(0)                       # ( 1, M, H*W)
+
+		inter = (p_chunk & g_chunk).sum(dim=2).float()   # (cs, M)
+		union = (p_chunk | g_chunk).sum(dim=2).float()   # (cs, M)
+		ious[row_start:row_end] = inter / union.clamp(min=1)
+
+		if debug:
+			logger.info(f'p_chunk: {p_chunk.shape} - g_chunk: {g_chunk.shape} - inter: {inter.shape} - union: {union.shape} - ious: {ious.shape}')
+
+		# Free the two large intermediates immediately
+		del inter, union, p_chunk, g_chunk
+
+	del pred_flat, gt_flat
+
+	return ious
+
