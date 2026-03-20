@@ -73,7 +73,7 @@ def mask_iou(pred_masks: torch.Tensor, gt_masks: torch.Tensor, debug=False) -> t
     ious = intersection / union.clamp(min=1)
     return ious  # shape: (N, M)
 
-def mask_iou_chunked(pred_masks: torch.Tensor, gt_masks: torch.Tensor, chunk_size=32, debug=True) -> torch.Tensor:
+def mask_iou_chunked(pred_masks: torch.Tensor, gt_masks: torch.Tensor, chunk_size=32, debug=False) -> torch.Tensor:
 	"""
 	Chunked drop-in replacement for mask_iou.
 	Peak extra VRAM: chunk_size × M × H*W instead of N × M × H*W.
