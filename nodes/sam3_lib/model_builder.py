@@ -904,6 +904,10 @@ def build_sam3_video_model(
             # Add detector. prefix to all keys so they map into the video model
             print(f"[SAM3] Fine-tuned model detected, remapping stuff...")
             remapped_ckpt = {f"detector.{k}": v for k, v in ckpt.items()}
+            #sam3_image_ckpt = { 
+            #    k.replace("detector.", ""): v for k, v in ckpt.items() if "detector" in k
+            #}   
+
         else:
             # Keys should already be in detector.*/tracker.* format
             # (incompatible formats are rejected by _load_checkpoint_file)
@@ -922,6 +926,39 @@ def build_sam3_video_model(
             }
             remapped_ckpt.update(inst_predictor_keys)
             print(f"[SAM3] Added {len(inst_predictor_keys)} keys for detector.inst_interactive_predictor")
+
+
+
+        if is_finetuned:
+            # SUGGESTED BY CLAUDE (fingers crossed...)
+            # Handle query count mismatch: slice checkpoint tensors to match model shape.
+            # This is better than random init — we keep the first N pretrained queries.
+            model_state = model.state_dict()
+            sam3_image_ckpt = remapped_ckpt
+            for key in list(sam3_image_ckpt.keys()):
+                if key in model_state:
+                    ckpt_shape = sam3_image_ckpt[key].shape
+                    model_shape = model_state[key].shape
+                    if ckpt_shape != model_shape:
+                        if all(c >= m for c, m in zip(ckpt_shape, model_shape)):
+                            # Checkpoint is larger: slice each dimension down to model size
+                            slices = tuple(slice(0, s) for s in model_shape)
+                            sam3_image_ckpt[key] = sam3_image_ckpt[key][slices]
+                            print(f"Sliced checkpoint key '{key}': {ckpt_shape} -> {model_shape}")
+                        else:
+                            # Checkpoint is smaller than model (shouldn't happen here, but
+                            # drop it and let the model use its own init rather than crash)
+                            print(f"Dropping checkpoint key '{key}': ckpt {ckpt_shape} < model {model_shape}")
+                            del sam3_image_ckpt[key]
+    
+
+
+
+
+
+
+
+
     
 	# ← now setting strict_state_dict_loading = False if loading a fine-tuned checkpoint at 672px resolution
         missing_keys, unexpected_keys = model.load_state_dict(
